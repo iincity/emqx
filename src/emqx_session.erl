@@ -369,7 +369,7 @@ init([Parent, #{zone                := Zone,
                   },
     emqx_sm:register_session(ClientId, attrs(State)),
     emqx_sm:set_session_stats(ClientId, stats(State)),
-    emqx_hooks:run('session.created', [#{client_id => ClientId}, info(State)]),
+    emqx_hooks:run('session.created', [#{client_id => ClientId, username => Username}, (State)]),
     GcPolicy = emqx_zone:get_env(Zone, force_gc_policy, false),
     ok = emqx_gc:init(GcPolicy),
     ok = emqx_misc:init_proc_mng_policy(Zone),
@@ -453,21 +453,21 @@ handle_call(Req, _From, State) ->
 
 %% SUBSCRIBE:
 handle_cast({subscribe, FromPid, {PacketId, _Properties, TopicFilters}},
-            State = #state{client_id = ClientId, subscriptions = Subscriptions}) ->
+            State = #state{client_id = ClientId, subscriptions = Subscriptions, username = Username}) ->
     {ReasonCodes, Subscriptions1} =
         lists:foldr(fun({Topic, SubOpts = #{qos := QoS}}, {RcAcc, SubMap}) ->
                             {[QoS|RcAcc], case maps:find(Topic, SubMap) of
                                               {ok, SubOpts} ->
-                                                  emqx_hooks:run('session.subscribed', [#{client_id => ClientId}, Topic, SubOpts#{first => false}]),
+                                                  emqx_hooks:run('session.subscribed', [#{client_id => ClientId, username => Username}, Topic, SubOpts#{first => false}]),
                                                   SubMap;
                                               {ok, _SubOpts} ->
                                                   emqx_broker:set_subopts(Topic, {self(), ClientId}, SubOpts),
                                                   %% Why???
-                                                  emqx_hooks:run('session.subscribed', [#{client_id => ClientId}, Topic, SubOpts#{first => false}]),
+                                                  emqx_hooks:run('session.subscribed', [#{client_id => ClientId, username => Username}, Topic, SubOpts#{first => false}]),
                                                   maps:put(Topic, SubOpts, SubMap);
                                               error ->
                                                   emqx_broker:subscribe(Topic, ClientId, SubOpts),
-                                                  emqx_hooks:run('session.subscribed', [#{client_id => ClientId}, Topic, SubOpts#{first => true}]),
+                                                  emqx_hooks:run('session.subscribed', [#{client_id => ClientId, username => Username}, Topic, SubOpts#{first => true}]),
                                                   maps:put(Topic, SubOpts, SubMap)
                                           end}
                     end, {[], Subscriptions}, TopicFilters),
@@ -476,13 +476,13 @@ handle_cast({subscribe, FromPid, {PacketId, _Properties, TopicFilters}},
 
 %% UNSUBSCRIBE:
 handle_cast({unsubscribe, From, {PacketId, _Properties, TopicFilters}},
-            State = #state{client_id = ClientId, subscriptions = Subscriptions}) ->
+            State = #state{client_id = ClientId, subscriptions = Subscriptions, username = Username}) ->
     {ReasonCodes, Subscriptions1} =
         lists:foldr(fun({Topic, _SubOpts}, {Acc, SubMap}) ->
                             case maps:find(Topic, SubMap) of
                                 {ok, SubOpts} ->
                                     ok = emqx_broker:unsubscribe(Topic, ClientId),
-                                    emqx_hooks:run('session.unsubscribed', [#{client_id => ClientId}, Topic, SubOpts]),
+                                    emqx_hooks:run('session.unsubscribed', [#{client_id => ClientId, username => Username}, Topic, SubOpts]),
                                     {[?RC_SUCCESS|Acc], maps:remove(Topic, SubMap)};
                                 error ->
                                     {[?RC_NO_SUBSCRIPTION_EXISTED|Acc], SubMap}
@@ -515,6 +515,7 @@ handle_cast({pubcomp, PacketId, _ReasonCode}, State = #state{inflight = Inflight
 
 %% RESUME:
 handle_cast({resume, #{conn_pid            := ConnPid,
+                       username            := Username,
                        will_msg            := WillMsg,
                        expiry_interval     := SessionExpiryInterval,
                        max_inflight        := MaxInflight, 
@@ -539,6 +540,7 @@ handle_cast({resume, #{conn_pid            := ConnPid,
     true = link(ConnPid),
 
     State1 = State#state{conn_pid            = ConnPid,
+                         username            = Username,
                          binding             = binding(ConnPid),
                          old_conn_pid        = OldConnPid,
                          clean_start         = false,
@@ -555,7 +557,7 @@ handle_cast({resume, #{conn_pid            := ConnPid,
     %% Clean Session: true -> false???
     CleanStart andalso emqx_sm:set_session_attrs(ClientId, attrs(State1)),
 
-    emqx_hooks:run('session.resumed', [#{client_id => ClientId}, attrs(State)]),
+    emqx_hooks:run('session.resumed', [#{client_id => ClientId, username => Username}, attrs(State)]),
 
     %% Replay delivery and Dequeue pending messages
     noreply(dequeue(retry_delivery(true, State1)));
@@ -646,8 +648,8 @@ handle_info(Info, State) ->
     emqx_logger:error("[Session] unexpected info: ~p", [Info]),
     {noreply, State}.
 
-terminate(Reason, #state{will_msg = WillMsg, client_id = ClientId, conn_pid = ConnPid}) ->
-    emqx_hooks:run('session.terminated', [#{client_id => ClientId}, Reason]),
+terminate(Reason, #state{will_msg = WillMsg, client_id = ClientId, conn_pid = ConnPid, username = Username}) ->
+    emqx_hooks:run('session.terminated', [#{client_id => ClientId, username => Username}, Reason]),
     send_willmsg(WillMsg),
     %% Ensure to shutdown the connection
     if
@@ -795,8 +797,8 @@ run_dispatch_steps([{subid, SubId}|Steps], Msg, State) ->
     run_dispatch_steps(Steps, emqx_message:set_header('Subscription-Identifier', SubId, Msg), State).
 
 %% Enqueue message if the client has been disconnected
-dispatch(Msg, State = #state{client_id = ClientId, conn_pid = undefined}) ->
-    case emqx_hooks:run('message.dropped', [#{client_id => ClientId}, Msg]) of
+dispatch(Msg, State = #state{client_id = ClientId, username = Username, conn_pid = undefined}) ->
+    case emqx_hooks:run('message.dropped', [#{client_id => ClientId, username => Username}, Msg]) of
         ok   -> enqueue_msg(Msg, State);
         stop -> State
     end;
@@ -845,20 +847,20 @@ await(PacketId, Msg, State = #state{inflight = Inflight}) ->
                   PacketId, {publish, {PacketId, Msg}, os:timestamp()}, Inflight),
     ensure_retry_timer(State#state{inflight = Inflight1}).
 
-acked(puback, PacketId, State = #state{client_id = ClientId, inflight  = Inflight}) ->
+acked(puback, PacketId, State = #state{client_id = ClientId, username = Username, inflight  = Inflight}) ->
     case emqx_inflight:lookup(PacketId, Inflight) of
         {value, {publish, {_, Msg}, _Ts}} ->
-            emqx_hooks:run('message.acked', [#{client_id => ClientId}], Msg),
+            emqx_hooks:run('message.acked', [#{client_id => ClientId, username => Username}], Msg),
             State#state{inflight = emqx_inflight:delete(PacketId, Inflight)};
         none ->
             ?LOG(warning, "Duplicated PUBACK PacketId ~w", [PacketId], State),
             State
     end;
 
-acked(pubrec, PacketId, State = #state{client_id = ClientId, inflight  = Inflight}) ->
+acked(pubrec, PacketId, State = #state{client_id = ClientId, username = Username, inflight  = Inflight}) ->
     case emqx_inflight:lookup(PacketId, Inflight) of
         {value, {publish, {_, Msg}, _Ts}} ->
-            emqx_hooks:run('message.acked', [#{client_id => ClientId}], Msg),
+            emqx_hooks:run('message.acked', [#{client_id => ClientId, username => Username}], Msg),
             State#state{inflight = emqx_inflight:update(PacketId, {pubrel, PacketId, os:timestamp()}, Inflight)};
         {value, {pubrel, PacketId, _Ts}} ->
             ?LOG(warning, "Duplicated PUBREC PacketId ~w", [PacketId], State),
