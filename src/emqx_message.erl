@@ -47,7 +47,7 @@ make(From, QoS, Topic, Payload) ->
              payload    = Payload,
              timestamp  = os:timestamp()}.
 
-msgid(?QOS0) -> undefined;
+% msgid(?QOS0) -> undefined;
 msgid(_QoS)  -> emqx_guid:gen().
 
 set_flags(Flags, Msg = #message{flags = undefined}) when is_map(Flags) ->
