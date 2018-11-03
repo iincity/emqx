@@ -59,10 +59,8 @@ open_session(SessAttrs = #{clean_start := true, client_id := ClientId, conn_pid 
                  end,
     emqx_sm_locker:trans(ClientId, CleanStart);
 
-open_session(SessAttrs = #{clean_start          := false, 
-                           client_id            := ClientId,
-                           max_inflight         := MaxInflight,
-                           topic_alias_maximum  := TopicAliasMaximum}) ->
+open_session(SessAttrs = #{clean_start := false,
+                           client_id   := ClientId}) ->
     ResumeStart = fun(_) ->
                       case resume_session(ClientId, SessAttrs) of
                           {ok, SPid} ->
